@@ -11,6 +11,7 @@ from synctoolbox.dtw.utils import make_path_strictly_monotonic
 from synctoolbox.feature.csv_tools import df_to_pitch_features
 from synctoolbox.feature.chroma import pitch_to_chroma, quantize_chroma
 from scoreinformed import convert_ann_to_constraint_region, hz_to_cents, cents_to_hz, visualize_salience_traj_constraints
+from scipy.stats import norm
 
 
 class MIDI2Align:
@@ -29,11 +30,17 @@ class MIDI2Align:
                                'constant')  # GIMMICK! zero pad the end
 
         self.feature_len = self.f_chroma.shape[1]
+        self.feature_times = np.arange(0,
+                                       self.feature_len / self.feature_rate,
+                                       1 / self.feature_rate)
         if obd_mode:
+            self.use_transcription_onset = 't' in obd_mode
             self.use_onset = 'o' in obd_mode
             self.use_beat = 'b' in obd_mode
             self.use_downbeat = 'd' in obd_mode
             self.f_onset = self.midi2sparse()
+        else:
+            self.f_onset = None
 
     def midi2df(self, midi=None):
         if not midi:
@@ -71,6 +78,25 @@ class MIDI2Align:
             feats[ind[:-1]] = 1
         return np.convolve(feats, [0.3, 1, 0.3], mode='same')
 
+    def df_start_to_onset(self):
+
+        onset_roll = np.zeros((12, len(self.feature_times)))
+        for i, row in self.df.iterrows():
+            onset = row.start*self.feature_rate
+            start = max(0, int(onset)-3)
+            end = min(self.feature_len-1, int(onset)+3)
+
+            vals = norm.pdf(np.linspace(start-onset, end-onset, end-start+1)/0.7)
+            # if you increase 0.7 you smooth the peak
+            # if you decrease it, e.g., 0.1, it becomes too peaky! around 0.5-0.7 seems ok
+            vals = vals/vals.max()
+            pitch = row.pitch % 12
+            onset_roll[pitch,start:end+1] += vals
+
+        onset_roll -= onset_roll.min()  # normalize using the same trick
+        onset_roll /= onset_roll.max()
+        return onset_roll
+
     def midi2sparse(self):
         feats = []
         assert any([self.use_onset, self.use_beat, self.use_downbeat])
@@ -80,7 +106,11 @@ class MIDI2Align:
             feats.append(self.times_to_sparse_features(self.midi.get_beats()))
         if self.use_downbeat:
             feats.append(self.times_to_sparse_features(self.midi.get_downbeats()))
-        return np.vstack(feats)
+        feats = np.vstack(feats)
+        if self.use_transcription_onset:
+            feats = np.vstack((feats, self.df_start_to_onset()))
+
+        return feats
 
     def aligned2midi(self, aligned_df):
         new_midi = copy.deepcopy(self.midi)
@@ -100,30 +130,20 @@ class MIDI2Align:
         assert self.f_chroma.shape[0] == audio_feats.f_chroma.shape[0]
         if hasattr(self, 'f_onset'):
             assert self.f_onset.shape[0] == audio_feats.f_onset.shape[0]
-            wp = sync_via_mrmsdtw_with_anchors(f_chroma1=self.f_chroma,
-                                               f_onset1=self.f_onset,
-                                               f_chroma2=audio_feats.f_chroma,
-                                               f_onset2=audio_feats.f_onset,
-                                               input_feature_rate=self.feature_rate,
-                                               step_weights=step_weights,
-                                               threshold_rec=threshold_rec,
-                                               verbose=False,
-                                               anchor_pairs=[(self.pad_gimmick,
-                                                              audio_start_anchor),
-                                                             (self.df['end'].max(),
-                                                              audio_end_anchor)])
+        wp = sync_via_mrmsdtw_with_anchors(f_chroma1=self.f_chroma,
+                                           f_onset1=self.f_onset,
+                                           f_chroma2=audio_feats.f_chroma,
+                                           f_onset2=audio_feats.f_onset,
+                                           input_feature_rate=self.feature_rate,
+                                           step_weights=step_weights,
+                                           threshold_rec=threshold_rec,
+                                           verbose=False,
+                                           anchor_pairs=[(self.pad_gimmick,
+                                                          audio_start_anchor),
+                                                         (self.df['end'].max(),
+                                                          audio_end_anchor)])
 
-        else:
-            wp = sync_via_mrmsdtw_with_anchors(f_chroma1=self.f_chroma,
-                                               f_chroma2=audio_feats.f_chroma,
-                                               input_feature_rate=self.feature_rate,
-                                               step_weights=step_weights,
-                                               threshold_rec=threshold_rec,
-                                               verbose=False,
-                                               anchor_pairs=[(self.pad_gimmick,
-                                                              audio_start_anchor),
-                                                             (self.df['end'].max(),
-                                                              audio_end_anchor)])
+
         wp_mono = make_path_strictly_monotonic(wp)
 
         df_aligned = copy.deepcopy(self.df)
@@ -185,8 +205,8 @@ class MIDI2Align:
 
     def estimate_audio_anchors_from_f0(self, f0_content, f0_threshold):
         smoothened_confidences = medfilt(f0_content.confidence, kernel_size=15)
-        anchor_candidates = f0_content[np.logical_and(f0_content.confidence > 0.8,
-                                                      smoothened_confidences > 0.6)]
+        anchor_candidates = f0_content[np.logical_and(f0_content.confidence > f0_threshold,
+                                                      smoothened_confidences > 0.5)]
 
         # now start searching for an end anchor candidate in the last 100 rows
         end_anchor_candidates = anchor_candidates.iloc[-100:]
@@ -227,4 +247,8 @@ class MIDI2Align:
                 cand = start_anchor_candidates[is_cand].iloc[0].time
                 if cand < start:
                     start = cand
+        if start == f0_content.iloc[0,0]:  # TODO: gimmick! anchor points have to be positive
+            start = f0_content.iloc[1,0]
+        if end == f0_content.iloc[-1,0]:
+            end = f0_content.iloc[-2,0]
         return start, end

@@ -15,9 +15,13 @@ from madmom.features.downbeats import RNNDownBeatProcessor
 from madmom.features.onsets import CNNOnsetProcessor
 
 
+midi_min = 42   # lowest violin note
+midi_max = 108  # highest violin
+
 class Audio2Align:
     def __init__(self, audio_path, Fs=22050, offset=0, duration=None,
-                 feature_rate=150, obd_mode='ob', Fs4dl=44100):
+                 feature_rate=150, obd_mode='ob', Fs4dl=44100,
+                 transcription_path=None):
         self.audio, _ = librosa.load(audio_path, sr=Fs,
                                      offset=offset, duration=duration)
         self.feature_rate = feature_rate
@@ -29,12 +33,20 @@ class Audio2Align:
         self.f_chroma = self.get_chroma_features_from_audio()
 
         self.feature_len = self.f_chroma.shape[1]
+        self.feature_times = np.arange(0,
+                                       self.feature_len / self.feature_rate,
+                                       1 / self.feature_rate)
+
+        self.transcription_path = transcription_path
 
         if obd_mode:
+            self.use_transcription_onset = ('t' in obd_mode) and transcription_path
             self.use_onset = 'o' in obd_mode
             self.use_beat = 'b' in obd_mode
             self.use_downbeat = 'd' in obd_mode
             self.f_onset = self.get_merged_act_function()
+        else:
+            self.f_onset = None
 
     def get_chroma_features_from_audio(self, verbose=False):
         f_pitch = audio_to_pitch_features(f_audio=self.audio,
@@ -45,6 +57,40 @@ class Audio2Align:
         f_chroma = pitch_to_chroma(f_pitch=f_pitch)
         f_chroma_quantized = quantize_chroma(f_chroma=f_chroma)
         return f_chroma_quantized
+
+
+    def get_basic_pitch_onsets_from_audio(self):
+        FFT_HOP = 256
+        AUDIO_SAMPLE_RATE = 22050
+        ANNOTATIONS_FPS = AUDIO_SAMPLE_RATE // FFT_HOP
+        AUDIO_WINDOW_LENGTH = 2  # duration in seconds of training examples - original 1
+        AUDIO_N_SAMPLES = AUDIO_SAMPLE_RATE * AUDIO_WINDOW_LENGTH - FFT_HOP
+        ANNOT_N_FRAMES = ANNOTATIONS_FPS * AUDIO_WINDOW_LENGTH
+        def basicpitch_frames_to_time(n_frames: int) -> np.ndarray:
+            original_times = librosa.core.frames_to_time(
+                np.arange(n_frames),
+                sr=AUDIO_SAMPLE_RATE,
+                hop_length=FFT_HOP,
+            )
+            window_numbers = np.floor(np.arange(n_frames) / ANNOT_N_FRAMES)
+            window_offset = (FFT_HOP / AUDIO_SAMPLE_RATE) * (
+                ANNOT_N_FRAMES - (AUDIO_N_SAMPLES / FFT_HOP)
+            ) + 0.0018  # this is a magic number, but it's needed for this to align properly
+            times = original_times - (window_offset * window_numbers)
+            return times
+        basic_feats = np.load(self.transcription_path, allow_pickle=True)
+        basic_feats = basic_feats['basic_pitch_model_output'].tolist()
+        basic_onset = basic_feats['onset'].T
+        basic_times = basicpitch_frames_to_time(basic_onset.shape[1])
+        onset_roll = np.zeros((12, len(self.feature_times)))
+        for piano_key, onset in enumerate(basic_onset):
+            midi_number = piano_key + 21
+            onset = np.interp(x=self.feature_times, xp=basic_times, fp=onset)
+            onset_roll[midi_number%12] += onset
+        onset_roll -= onset_roll.min()  # this thing is quite noisy!
+        onset_roll /= onset_roll.max()
+        return onset_roll
+
 
     def get_DLNCO_features_from_audio(self, verbose=False):
         f_pitch_onset = audio_to_pitch_onset_features(f_audio=self.audio,
@@ -181,8 +227,11 @@ class Audio2Align:
         if self.use_downbeat:
             af = self.get_RNN_downbeat_act_function_from_audio()
             afs.append(np.reshape(af, af.shape[1]))
-
         f_novelty = np.array(afs)
+
+        if self.use_transcription_onset:
+            af = self.get_basic_pitch_onsets_from_audio()
+            f_novelty = np.vstack((f_novelty, af))
 
         print('Merge_act_fun size: ' + str(f_novelty.shape[1]))
         return f_novelty
