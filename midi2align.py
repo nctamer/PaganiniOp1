@@ -61,7 +61,7 @@ class MIDI2Align:
             *[(i, x) for i, x in sorted(enumerate(midi_list), key=lambda x: (x[1][0], x[1][2]))])
 
         df = pd.DataFrame(midi_list, columns=['start', 'duration', 'pitch', 'velocity', 'instrument'])
-        return df, list(sort_index)
+        return df, sort_index
 
     def get_features_from_df(self):
         f_pitch = df_to_pitch_features(self.df, feature_rate=self.feature_rate)
@@ -118,7 +118,7 @@ class MIDI2Align:
         i = 0
         for instrument in new_midi.instruments:
             for note in instrument.notes:
-                df_index = self.df_order[i]
+                df_index = self.df_order.index(i)
                 note.start = aligned_df.loc[df_index, 'start']
                 note.end = aligned_df.loc[df_index, 'end']
                 i += 1
