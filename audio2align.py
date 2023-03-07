@@ -36,7 +36,7 @@ class Audio2Align:
         self.feature_times = np.arange(0,
                                        self.feature_len / self.feature_rate,
                                        1 / self.feature_rate)
-
+        self.feature_times = self.feature_times[:self.feature_len]
         self.transcription_path = transcription_path
 
         if obd_mode:

@@ -33,6 +33,7 @@ class MIDI2Align:
         self.feature_times = np.arange(0,
                                        self.feature_len / self.feature_rate,
                                        1 / self.feature_rate)
+        self.feature_times = self.feature_times[:self.feature_len]
         if obd_mode:
             self.use_transcription_onset = 't' in obd_mode
             self.use_onset = 'o' in obd_mode
